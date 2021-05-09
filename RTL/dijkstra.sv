@@ -52,19 +52,37 @@ logic [VIRTEX_NUM_WIDTH-1:0]  virtex_cnt_ff;
 logic                         virtex_cnt_en;
 logic                         res_rdy;
 logic                         res_sent;
+logic                         rd_rdy;
 
+logic [ITER_NUM_WIDTH  -1:0]  rd_cnt_next;
+logic [ITER_NUM_WIDTH  -1:0]  rd_cnt_ff;
+logic [ITER_NUM_WIDTH  -1:0]  upd_cnt_next;
+logic [ITER_NUM_WIDTH  -1:0]  upd_cnt_ff;
 
-// -------------- Global state ------------------
+// Internal register file 
+logic [PIPE_WIDTH                  -1:0] data_upd_vec;
+logic [VIRTEX_DWIDTH*PIPE_WIDTH    -1:0] dist_vect_upd;
+logic [VIRTEX_DWIDTH*PIPE_WIDTH    -1:0] dist_vect_ff    [MAX_VIRTEX_NUM / PIPE_WIDTH -1:0];
+logic [VIRTEX_NUM_WIDTH*PIPE_WIDTH -1:0] route_vect_upd;
+logic [VIRTEX_NUM_WIDTH*PIPE_WIDTH -1:0] route_vect_ff   [MAX_VIRTEX_NUM / PIPE_WIDTH -1:0];
+// -------------- Global state ------------------ 
  
 always_ff @(posedge clk or negedge rst_n) begin 
 	if(~rst_n) begin
 		virtex_curr_ff <= 0;
 		virtex_num_ff  <= 0;
 	end else begin
-		virtex_curr_ff <= accel_virt_initial_i;
+		virtex_curr_ff <= accel_virt_initial_i; //FIXME		
 		virtex_num_ff  <= accel_virt_num_i;
 	end
 end
+
+always_ff @(posedge clk or negedge rst_n) 
+	if(~rst_n) 
+		accel_start_ff <= 0;
+	else begin
+		accel_start_ff <= accel_start_i; //FIXME		
+
 
 assign accel_state_en = accel_start_i | res_rdy | res_sent;
 
@@ -115,7 +133,48 @@ end
 
 // Virtex weights are signed, so if weight is negative - this means that there is no link betveen two virtexes
 
-assign 
+assign proc_state_en = accel_start_i | rd_rdy | cmp_rdy;
+
+assign proc_states_next[PROC_STATE_RDY]  = proc_state_ff[PROC_STATE_CMP]  & cmp_rdy;
+assign proc_states_next[PROC_STATE_CALC] = proc_state_ff[PROC_STATE_RDY]  & accel_start_i;
+assign proc_states_next[PROC_STATE_CMP]  = proc_state_ff[PROC_STATE_CALC] & rd_rdy;
+
+always_ff @(posedge clk or negedge rst_n) begin 
+	if(~rst_n) begin
+		proc_state_ff <= 1;
+	end else begin
+		if (proc_state_en)
+		proc_state_ff <= proc_states_next;
+	end
+end
+
+assign rd_rdy = (rd_cnt_ff == virtex_num_ff);
+
+assign rd_cnt_next = rd_rdy ? '0 
+							: ( proc_state_ff[PROC_STATE_CALC] ? rd_cnt_ff + 1 : rd_cnt_ff); 
+
+always_ff @(posedge clk or negedge rst_n) begin 
+	if(~rst_n) begin
+		rd_cnt_ff <= '0;
+	end else begin
+		rd_cnt_ff <= rd_cnt_next;
+	end
+end
+
+assign rf_upd_en = ( ( rd_cnt_ff > 1 ) | proc_state_ff[PROC_STATE_CMP] );
+assign upd_cnt_next = ( upd_cnt_ff == ( virtex_num_ff -1 ) ) ? '0 
+							                                 : ( ( ( rd_cnt_ff > 1 ) | proc_state_ff[PROC_STATE_CMP] ) ? upd_cnt_ff + 1
+							                                                                                           : upd_cnt_ff ); 
+
+always_ff @(posedge clk or negedge rst_n) begin 
+	if(~rst_n) begin
+		upd_cnt_ff <= '0;
+	end else begin
+		upd_cnt_ff <= upd_cnt_next;
+	end
+end
+
+assign proc_data_en = proc_state_ff[PROC_STATE_CALC];
 
 for (genvar idx = 0; idx < PIPE_WIDTH ; idx = idx + 1) begin : g_virt_proc
 	always_ff @(posedge clk ) 
@@ -124,7 +183,34 @@ for (genvar idx = 0; idx < PIPE_WIDTH ; idx = idx + 1) begin : g_virt_proc
 			sum_data_ff [idx] <= rams_data_ff[idx] + v_curr_weight_ff;
         end
 
+    assign data_upd_vec[idx] = ( sum_data_ff [idx] < dist_vect_ff[(idx + 1) * VIRTEX_DWIDTH -1 -: VIRTEX_DWIDTH] );
+	assign dist_vect_upd[(idx + 1) * VIRTEX_DWIDTH -1 -: VIRTEX_DWIDTH] = data_upd_vec[idx] 
+	                                                                    ? sum_data_ff [idx] 
+	                                                                    : dist_vect_ff[(idx + 1) * VIRTEX_DWIDTH -1 -: VIRTEX_DWIDTH];
+
+	assign route_vect_upd[(idx + 1) * VIRTEX_NUM_WIDTH -1 -: VIRTEX_NUM_WIDTH] = data_upd_vec[idx] 
+																			   ? virtex_curr_ff 
+	                                                                           : route_vect_ff[(idx + 1) * VIRTEX_NUM_WIDTH -1 -: VIRTEX_NUM_WIDTH];
+
+	assign route_vect_init[idx] = virtex_curr_ff;
+
+	assign dist_vect_init[idx] = (idx == (virtex_curr_ff - {(virtex_curr_ff >> PIPE_SHIFT ) , {PIPE_WIDTH{0}}}) ? '0 : '1;
+
 end :  g_virt_proc
+
+for (genvar idx = 0; idx < MAX_VIRTEX_NUM/PIPE_WIDTH ; idx = idx + 1) begin : g_virt_upd
+	always_ff @(posedge clk or negedge rst_n) 
+    	if (~rst_n) begin
+    		dist_vect_ff[idx]  <= '1;
+    		route_vect_ff[idx] <= '0;
+    	end else if( rf_upd_en & (idx == upd_cnt_ff) ) begin
+			dist_vect_ff[idx]  <= dist_vect_upd;
+			route_vect_ff[idx] <= route_vect_upd;
+		end else if( accel_start_ff ) begin
+			dist_vect_ff[idx]  <= (idx == (virtex_curr_ff >> PIPE_SHIFT) ) dist_vect_init : '1;
+			route_vect_ff[idx] <= route_vect_init;
+		end 
+end : g_virt_upd
 
 endmodule
 

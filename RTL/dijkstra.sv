@@ -59,6 +59,17 @@ logic [ITER_NUM_WIDTH  -1:0]  rd_cnt_ff;
 logic [ITER_NUM_WIDTH  -1:0]  upd_cnt_next;
 logic [ITER_NUM_WIDTH  -1:0]  upd_cnt_ff;
 
+logic [VIRTEX_DWIDTH   -1:0]  cmp_tmp_next    [MAX_VIRTEX_NUM/PIPE_WIDTH -1:0];
+logic [VIRTEX_NUM_WIDTH-1:0]  cmp_tmp_idx_next[MAX_VIRTEX_NUM/PIPE_WIDTH -1:0];
+logic [VIRTEX_NUM_WIDTH-1:0]  cmp_tmp_idx_ff  [MAX_VIRTEX_NUM/PIPE_WIDTH -1:0];
+logic [VIRTEX_DWIDTH   -1:0]  cmp_tmp_ff      [MAX_VIRTEX_NUM/PIPE_WIDTH -1:0];
+logic                         cmp_tmp_lower   [MAX_VIRTEX_NUM/PIPE_WIDTH -1:0];
+logic                         cmp_final_lower;
+logic [VIRTEX_DWIDTH   -1:0]  cmp_final_w_ff;
+logic [VIRTEX_DWIDTH   -1:0]  cmp_final_w_next;
+logic [VIRTEX_NUM_WIDTH-1:0]  cmp_final_idx_ff;
+logic [VIRTEX_NUM_WIDTH-1:0]  cmp_final_idx_next;
+
 // Internal register file 
 logic [PIPE_WIDTH                  -1:0] data_upd_vec;
 logic [VIRTEX_DWIDTH*PIPE_WIDTH    -1:0] dist_vect_upd;
@@ -133,6 +144,8 @@ end
 
 // Virtex weights are signed, so if weight is negative - this means that there is no link betveen two virtexes
 
+// ---------------Control Logic ------------------------------
+
 assign proc_state_en = accel_start_i | rd_rdy | cmp_rdy;
 
 assign proc_states_next[PROC_STATE_RDY]  = proc_state_ff[PROC_STATE_CMP]  & cmp_rdy;
@@ -148,7 +161,7 @@ always_ff @(posedge clk or negedge rst_n) begin
 	end
 end
 
-assign rd_rdy = (rd_cnt_ff == virtex_num_ff);
+assign rd_rdy = (rd_cnt_ff == virtex_num_ff >> PIPE_SHIFT);
 
 assign rd_cnt_next = rd_rdy ? '0 
 							: ( proc_state_ff[PROC_STATE_CALC] ? rd_cnt_ff + 1 : rd_cnt_ff); 
@@ -175,6 +188,9 @@ always_ff @(posedge clk or negedge rst_n) begin
 end
 
 assign proc_data_en = proc_state_ff[PROC_STATE_CALC];
+
+// --------------- Register File update---------------------------------
+//! Optimise this logic
 
 for (genvar idx = 0; idx < PIPE_WIDTH ; idx = idx + 1) begin : g_virt_proc
 	always_ff @(posedge clk ) 
@@ -211,6 +227,48 @@ for (genvar idx = 0; idx < MAX_VIRTEX_NUM/PIPE_WIDTH ; idx = idx + 1) begin : g_
 			route_vect_ff[idx] <= route_vect_init;
 		end 
 end : g_virt_upd
+
+// ----------------------- Select next virtex ----------------------
+
+// Add control logic
+
+// first stage comparison
+for (genvar idx = 0; idx < MAX_VIRTEX_NUM/PIPE_WIDTH; idx = idx + 1) begin : g_cmp
+	always_ff @(posedge clk) begin
+		cmp_tmp_ff[idx]     <= cmp_tmp_next[idx];
+        cmp_tmp_idx_ff[idx] <= cmp_tmp_idx_next[idx];
+	end
+
+	assign cmp_tmp_lower[idx] = ( dist_vect_upd[idx] [(cmp_cnt_ff + 1) * VIRTEX_DWIDTH -1 -: VIRTEX_DWIDTH] < cmp_tmp_ff[idx] );
+
+	assign cmp_tmp_next[idx]  = proc_state_ff[PROC_STATE_CMP] 
+		                        ? ( cmp_tmp_lower[idx] ? dist_vect_ff[idx][(cmp_cnt_ff + 1) * VIRTEX_DWIDTH -1 -: VIRTEX_DWIDTH]
+		                        	                   : cmp_tmp_ff[idx] )
+							    : proc_state_ff[PROC_STATE_RDY] ? '1
+														        : cmp_tmp_ff[idx]; 
+
+    assign cmp_tmp_idx_next[idx] =  proc_state_ff[PROC_STATE_CMP] 
+		                            ? ( cmp_tmp_lower[idx] ? (idx << PIPE_SHIFT) + cmp_cnt_ff
+		                            	                   : cmp_tmp_idx_ff[idx] )
+							        : proc_state_ff[PROC_STATE_RDY] ? '0
+														            : cmp_tmp_idx_ff[idx];
+end
+
+	always_ff @(posedge clk) begin
+		cmp_final_w_ff   <= cmp_final_w_next;
+        cmp_final_idx_ff <= cmp_final_idx_next;
+	end
+
+	assign cmp_tmp_lower    = (cmp_tmp_ff[cmp_cnt_ff] < cmp_final_w_ff); 
+	assign cmp_final_w_next = cmp_state_ff[STAGE_2] 
+		                      ? ( cmp_tmp_lower ? cmp_tmp_ff[cmp_cnt_ff] : cmp_final_w_ff )
+							  : ( proc_state_ff[PROC_STATE_RDY] ? '1
+												                : cmp_final_w_ff );
+
+	assign cmp_final_w_next = cmp_state_ff[STAGE_2] 
+		                      ? ( cmp_tmp_lower ? cmp_tmp_idx_ff[cmp_cnt_ff] : cmp_final_idx_ff )
+							  : ( proc_state_ff[PROC_STATE_RDY] ? '1
+												                : cmp_final_idx_ff );
 
 endmodule
 

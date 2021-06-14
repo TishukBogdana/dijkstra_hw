@@ -1,5 +1,5 @@
 // Dijkstra alogorithm hardware implementation
-`include "dijkstra_params.svh" 
+
 
 module dijkstra (
 	input  logic clk,    // Clock
@@ -30,17 +30,23 @@ localparam PROC_STATE_CALC = 1;
 localparam PROC_STATE_CMP  = 2;
 localparam PROC_NUM_STATES = 3;
 
+localparam STAGE_2 = 0;
+
+
+logic                         accel_start;
 logic                         accel_state_en;
 logic [ACC_NUM_STATES-1:0]    accel_state_next;
 logic [ACC_NUM_STATES-1:0]    accel_state_ff;
+logic [ACC_NUM_STATES-1:0]    accel_state_ff;
+
 logic                         proc_state_en;
 logic [PROC_NUM_STATES-1:0]   proc_states_next;
 logic [PROC_NUM_STATES-1:0]   proc_state_ff;
-
+logic                         accel_start_ff;
 logic                         proc_data_en;
 logic [VIRTEX_DWIDTH-1:0]     rams_data_ff [PIPE_WIDTH-1:0];
 logic [VIRTEX_DWIDTH-1:0]     sum_data_ff  [PIPE_WIDTH-1:0];
-logic [VIRTEX_NUM_WIDTH-1:0]  v_curr_num_ff;
+logic [VIRTEX_NUM_WIDTH-1:0]  virtex_curr_ff;
 logic [VIRTEX_DWIDTH-1:0]     v_curr_weight_ff;
 
 logic [VIRTEX_NUM_WIDTH-1:0]  virtex_num_ff;
@@ -53,6 +59,7 @@ logic                         virtex_cnt_en;
 logic                         res_rdy;
 logic                         res_sent;
 logic                         rd_rdy;
+logic                         cmp_rdy;
 
 logic [ITER_NUM_WIDTH  -1:0]  rd_cnt_next;
 logic [ITER_NUM_WIDTH  -1:0]  rd_cnt_ff;
@@ -63,7 +70,11 @@ logic [VIRTEX_DWIDTH   -1:0]  cmp_tmp_next    [MAX_VIRTEX_NUM/PIPE_WIDTH -1:0];
 logic [VIRTEX_NUM_WIDTH-1:0]  cmp_tmp_idx_next[MAX_VIRTEX_NUM/PIPE_WIDTH -1:0];
 logic [VIRTEX_NUM_WIDTH-1:0]  cmp_tmp_idx_ff  [MAX_VIRTEX_NUM/PIPE_WIDTH -1:0];
 logic [VIRTEX_DWIDTH   -1:0]  cmp_tmp_ff      [MAX_VIRTEX_NUM/PIPE_WIDTH -1:0];
-logic                         cmp_tmp_lower   [MAX_VIRTEX_NUM/PIPE_WIDTH -1:0];
+logic [MAX_VIRTEX_NUM/PIPE_WIDTH -1:0]  cmp_tmp_lower;
+logic                   [1:0] cmp_state_ff;
+
+
+logic [VIRTEX_NUM_WIDTH-1:0]  cmp_cnt_ff;
 logic                         cmp_final_lower;
 logic [VIRTEX_DWIDTH   -1:0]  cmp_final_w_ff;
 logic [VIRTEX_DWIDTH   -1:0]  cmp_final_w_next;
@@ -76,14 +87,14 @@ logic [VIRTEX_DWIDTH*PIPE_WIDTH    -1:0] dist_vect_upd;
 logic [VIRTEX_DWIDTH*PIPE_WIDTH    -1:0] dist_vect_ff    [MAX_VIRTEX_NUM / PIPE_WIDTH -1:0];
 logic [VIRTEX_NUM_WIDTH*PIPE_WIDTH -1:0] route_vect_upd;
 logic [VIRTEX_NUM_WIDTH*PIPE_WIDTH -1:0] route_vect_ff   [MAX_VIRTEX_NUM / PIPE_WIDTH -1:0];
+logic [VIRTEX_NUM_WIDTH*PIPE_WIDTH -1:0] dist_vect_init;
 // -------------- Global state ------------------ 
  
+assign accel_start = accel_state_next[ACC_STATE_CALC];
 always_ff @(posedge clk or negedge rst_n) begin 
 	if(~rst_n) begin
-		virtex_curr_ff <= 0;
 		virtex_num_ff  <= 0;
-	end else begin
-		virtex_curr_ff <= accel_virt_initial_i; //FIXME		
+	end else begin		
 		virtex_num_ff  <= accel_virt_num_i;
 	end
 end
@@ -91,8 +102,8 @@ end
 always_ff @(posedge clk or negedge rst_n) 
 	if(~rst_n) 
 		accel_start_ff <= 0;
-	else begin
-		accel_start_ff <= accel_start_i; //FIXME		
+	else 
+		accel_start_ff <= accel_start; //FIXME		
 
 
 assign accel_state_en = accel_start_i | res_rdy | res_sent;
@@ -113,8 +124,8 @@ always_ff @(posedge clk or negedge rst_n) begin
 	end
 end
 
-assign iter_cnt_next = accel_start_i ? ( accel_virt_num_i >> PIPE_SHIFT )
-                                     : ( accel_state_ff[ACC_STATE_RES] ? iter_cnt_ff - 1 : iter_cnt_ff );
+assign iter_cnt_next = accel_start ? ( accel_virt_num_i >> PIPE_SHIFT )
+                                   : ( accel_state_ff[ACC_STATE_RES] ? iter_cnt_ff - 1 : iter_cnt_ff );
 
 always_ff @(posedge clk or negedge rst_n) begin 
 	if(~rst_n) begin
@@ -124,9 +135,9 @@ always_ff @(posedge clk or negedge rst_n) begin
 	end
 end
 
-assign virtex_cnt_en   = accel_start_i | accel_state_ff[ACC_STATE_CALC];
-assign virtex_cnt_next = accel_start_i ? '0
-									   : ( proc_state_ff[PROC_STATE_RDY] ? ( virtex_cnt_ff + 1 ) : virtex_cnt_ff  );
+assign virtex_cnt_en   = accel_start | accel_state_ff[ACC_STATE_CALC];
+assign virtex_cnt_next = accel_start ? '0
+									 : ( proc_state_ff[PROC_STATE_RDY] ? ( virtex_cnt_ff + 1 ) : virtex_cnt_ff  );
 
 always_ff @(posedge clk or negedge rst_n) begin 
 	if(~rst_n) begin
@@ -137,6 +148,9 @@ always_ff @(posedge clk or negedge rst_n) begin
 	end
 end
 
+// Memory interface
+assign weights_ram_addr_o = (iter_cnt_ff << PIPE_SHIFT) + rd_cnt_ff;
+assign weights_ram_cs_o   = proc_state_ff[PROC_STATE_CALC] & ~rd_rdy;
 
 // ---------------------------------------------
 // Virtex processing
@@ -146,10 +160,10 @@ end
 
 // ---------------Control Logic ------------------------------
 
-assign proc_state_en = accel_start_i | rd_rdy | cmp_rdy;
+assign proc_state_en = accel_start | rd_rdy | cmp_rdy;
 
 assign proc_states_next[PROC_STATE_RDY]  = proc_state_ff[PROC_STATE_CMP]  & cmp_rdy;
-assign proc_states_next[PROC_STATE_CALC] = proc_state_ff[PROC_STATE_RDY]  & accel_start_i;
+assign proc_states_next[PROC_STATE_CALC] = proc_state_ff[PROC_STATE_RDY]  & accel_start;
 assign proc_states_next[PROC_STATE_CMP]  = proc_state_ff[PROC_STATE_CALC] & rd_rdy;
 
 always_ff @(posedge clk or negedge rst_n) begin 
@@ -199,18 +213,17 @@ for (genvar idx = 0; idx < PIPE_WIDTH ; idx = idx + 1) begin : g_virt_proc
 			sum_data_ff [idx] <= rams_data_ff[idx] + v_curr_weight_ff;
         end
 
-    assign data_upd_vec[idx] = ( sum_data_ff [idx] < dist_vect_ff[(idx + 1) * VIRTEX_DWIDTH -1 -: VIRTEX_DWIDTH] );
+    assign data_upd_vec[idx] = ( sum_data_ff [idx] < dist_vect_ff[iter_cnt_ff][(idx + 1) * VIRTEX_DWIDTH -1 -: VIRTEX_DWIDTH] );
 	assign dist_vect_upd[(idx + 1) * VIRTEX_DWIDTH -1 -: VIRTEX_DWIDTH] = data_upd_vec[idx] 
 	                                                                    ? sum_data_ff [idx] 
-	                                                                    : dist_vect_ff[(idx + 1) * VIRTEX_DWIDTH -1 -: VIRTEX_DWIDTH];
+	                                                                    : dist_vect_ff[iter_cnt_ff][(idx + 1) * VIRTEX_DWIDTH -1 -: VIRTEX_DWIDTH];
 
 	assign route_vect_upd[(idx + 1) * VIRTEX_NUM_WIDTH -1 -: VIRTEX_NUM_WIDTH] = data_upd_vec[idx] 
 																			   ? virtex_curr_ff 
-	                                                                           : route_vect_ff[(idx + 1) * VIRTEX_NUM_WIDTH -1 -: VIRTEX_NUM_WIDTH];
+	                                                                           : route_vect_ff[iter_cnt_ff][(idx + 1) * VIRTEX_NUM_WIDTH -1 -: VIRTEX_NUM_WIDTH];
 
-	assign route_vect_init[idx] = virtex_curr_ff;
-
-	assign dist_vect_init[idx] = (idx == (virtex_curr_ff - {(virtex_curr_ff >> PIPE_SHIFT ) , {PIPE_WIDTH{0}}}) ? '0 : '1;
+// ??
+	assign dist_vect_init[idx] = (idx == (virtex_curr_ff - {(virtex_curr_ff >> PIPE_SHIFT ) , {PIPE_WIDTH{0}}}) ) ? '0 : '1;
 
 end :  g_virt_proc
 
@@ -223,8 +236,8 @@ for (genvar idx = 0; idx < MAX_VIRTEX_NUM/PIPE_WIDTH ; idx = idx + 1) begin : g_
 			dist_vect_ff[idx]  <= dist_vect_upd;
 			route_vect_ff[idx] <= route_vect_upd;
 		end else if( accel_start_ff ) begin
-			dist_vect_ff[idx]  <= (idx == (virtex_curr_ff >> PIPE_SHIFT) ) dist_vect_init : '1;
-			route_vect_ff[idx] <= route_vect_init;
+			dist_vect_ff[idx]  <= (idx == (virtex_curr_ff >> PIPE_SHIFT) ) ? dist_vect_init : '1;
+			route_vect_ff[idx] <= virtex_curr_ff;
 		end 
 end : g_virt_upd
 
@@ -260,7 +273,7 @@ end
 	end
 
 	assign cmp_tmp_lower    = (cmp_tmp_ff[cmp_cnt_ff] < cmp_final_w_ff); 
-	assign cmp_final_w_next = cmp_state_ff[STAGE_2] 
+	assign cmp_final_w_next = cmp_state_ff[STAGE_2]
 		                      ? ( cmp_tmp_lower ? cmp_tmp_ff[cmp_cnt_ff] : cmp_final_w_ff )
 							  : ( proc_state_ff[PROC_STATE_RDY] ? '1
 												                : cmp_final_w_ff );
@@ -269,6 +282,17 @@ end
 		                      ? ( cmp_tmp_lower ? cmp_tmp_idx_ff[cmp_cnt_ff] : cmp_final_idx_ff )
 							  : ( proc_state_ff[PROC_STATE_RDY] ? '1
 												                : cmp_final_idx_ff );
+
+    // Virtex select
+    assign virtex_curr_next = accel_start ? accel_virt_initial_i : cmp_final_idx_ff;
+
+    always_ff @(posedge clk or negedge rst_n) begin 
+    	if(~rst_n) begin
+    		virtex_curr_ff <= 0;
+    	end else begin
+    		virtex_curr_ff <= virtex_curr_next;
+    	end
+    end
 
 endmodule
 

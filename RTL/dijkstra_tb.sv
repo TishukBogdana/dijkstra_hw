@@ -96,7 +96,8 @@ initial begin
     virt_mem [2][4] = 32'hA;
     virt_mem [3][1] = 32'h28;
     virt_mem [3][2] = 32'h14;
-    virt_mem [4][2] = 32'h1E;
+    virt_mem [4][2] = 32'hA;
+    virt_mem [4][3] = 32'h1E;
     
     
       #1 rst_n = 0;

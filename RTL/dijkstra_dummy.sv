@@ -49,7 +49,7 @@ logic [VIRTEX_DWIDTH   -1:0] virt_curr_weight_ff;
 logic                        weights_rdata_en;
 logic                        rf_upd_en;
 logic                        cmp_src_sel_ff;
-logic                  [2:0] calc_proc_ff;  // counter of calculation phase steps
+logic                  [3:0] calc_proc_ff;  // counter of calculation phase steps
 logic [VIRTEX_NUM_WIDTH-1:0] virt_cnt_ff;   // Virtex processign counter
 logic [VIRTEX_NUM_WIDTH-1:0] cmp_cnt_ff;    // Compare log cpunter
 logic                        weight_lower     [MAX_VIRTEX_NUM-1:0]; // Route vector
@@ -88,7 +88,7 @@ assign dj_start = dj_start_ff & dj_state_ff[STATE_IDLE];
 
 assign dj_state_en = dj_start | dj_finish | calc_rdy | cmp_rdy;
 
-assign calc_rdy = calc_proc_ff[2];
+assign calc_rdy = calc_proc_ff[3];
 
 assign cmp_rdy = ~(|cmp_cnt_ff);
 
@@ -108,7 +108,7 @@ always_ff @(posedge clk or negedge rst_n)
      if (~rst_n)
          calc_proc_ff <= '0;
      else 
-         calc_proc_ff <= ( dj_state_en & dj_state_next[STATE_CALC] ) ? 2'b01 : calc_proc_ff << 1'b1;       
+         calc_proc_ff <= ( dj_state_en & dj_state_next[STATE_CALC] ) ? 4'b0001 : calc_proc_ff << 1'b1;       
          
  always_ff @(posedge clk or negedge rst_n )
      if (~rst_n)
@@ -129,8 +129,8 @@ always_ff @(posedge clk or negedge rst_n)
             cmp_cnt_ff <= dj_state_next[STATE_CMP] ? 4'b1000 : (dj_state_ff[STATE_CMP] & ~cmp_rdy ? cmp_cnt_ff >> 1 : '1);
  
 // Dataflow
-assign weights_rdata_en = calc_proc_ff[0];
-assign rf_upd_en = dj_start | calc_proc_ff[2];
+assign weights_rdata_en = calc_proc_ff[1];
+assign rf_upd_en = dj_start | calc_proc_ff[3];
         
 for (genvar idx = 0; idx < MAX_VIRTEX_NUM; idx = idx + 1) begin : g_dataflow
     always_ff @(posedge clk or negedge rst_n)
@@ -164,12 +164,12 @@ for (genvar idx = 0; idx < MAX_VIRTEX_NUM; idx = idx + 1) begin : g_dataflow
                 else if (rf_upd_en)
                     visit_vect_ff[idx]  <= dj_start ? '0 : (virt_curr_num_ff == idx) ? '1: visit_vect_ff[idx];
             
-    assign weight_lower[idx] = ( weights_sum_ff[idx] < dist_rf_ff[idx] ) & ~(weights_rdata_ff[idx]);
+    assign weight_lower[idx] = ( weights_sum_ff[idx] < dist_rf_ff[idx] ) & ~(&weights_rdata_ff[idx]);
     assign dist_rf_next[idx] = dj_start ? ( (idx == virt_curr_num_ff) ? '0 : '1)
                                         : ( weight_lower[idx] ? weights_sum_ff[idx] : dist_rf_ff[idx] );
    
     assign route_vect_next[idx] = dj_start ? virt_curr_num_ff
-                                        : ( weight_lower[idx] ? idx : dist_rf_ff[idx] );   
+                                        : ( weight_lower[idx] ? virt_curr_num_ff : route_vect_ff[idx] );   
     //! check timings                                    
     assign weight_cmp_next[idx] = cmp_src_sel_ff ? (dist_rf_ff[idx] | {VIRTEX_DWIDTH{visit_vect_ff[idx]}})
                                                  : (idx < MAX_VIRTEX_NUM/2) ?   weight_cmpbuf_ff[idx] : '1;                            
@@ -189,9 +189,13 @@ end
 
 // output assignments
 assign weights_ram_addr_o = virt_curr_num_ff;
-assign weights_ram_cs_o   = cmp_rdy | dj_start ;
+assign weights_ram_cs_o   = calc_proc_ff[0] | dj_start ;
 assign dj_rdy_o           = dj_state_ff[STATE_IDLE];
 assign result_rdy_o       = dj_finish;
+for (genvar i = 0; i < MAX_VIRTEX_NUM; i = i + 1) begin
+    assign route_vect_o[i] = route_vect_ff[i];
+    assign dist_vect_o[i] = dist_rf_ff[i];
+end
 
 // ------------
 
